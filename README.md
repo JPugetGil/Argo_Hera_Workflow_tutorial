@@ -368,3 +368,11 @@ Now we have the building blocks, we can assemble them into a `Workflow` and then
 - USGS FDSN event web service - <https://earthquake.usgs.gov/fdsnws/event/1/>
 - ArgoCon EU 2024 talk *"Orchestrating Python Functions Natively with Hera"* - <https://pipekit.io/blog/orchestrating-python-functions-natively-argo-hera>
 
+---
+
+## 6. Future directions
+
+If you want to take the workshop code further, here are some ideas for next steps:
+
+1. **Stretch - failure injection.** Add `retry_strategy=RetryStrategy(limit=2)` to `analyze_event`. Force one iteration to fail (e.g. point its URL at `https://earthquake.usgs.gov/does-not-exist`) and observe Argo's retry behaviour live.
+2. **Stretch - caching.** Add `memoize=Memoize(...)` on `analyze_event` keyed by the event id, resubmit, and observe that previously-seen events are skipped on re-runs.
