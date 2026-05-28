@@ -1,107 +1,29 @@
-# Hera Workflows: from Python functions to distributed scientific pipelines
+import os
+from hera.workflows import Artifact, DAG, Parameter, WorkflowTemplate, script
+from hera.workflows.models import ArchiveStrategy, NoneStrategy, Sequence, ValueFrom
+from hera.shared import global_config
 
-> **Case study:** Aftershock sequences around recent significant earthquakes, sourced from the public **USGS FDSN event** API - one analysis per mainshock, in parallel, with per-event diagnostic figures (including a real GIS epicenter map) and a final cross-event **world map** of every analyzed mainshock. Packaged as a **`WorkflowTemplate`** parameterised by `start_time` / `end_time` / `limit` / `min_magnitude`, so the same template can be re-submitted with different windows.
+USGS_ENDPOINT = "https://earthquake.usgs.gov/fdsnws/event/1/query"
+IMAGE = "jupyter/scipy-notebook:latest"
 
----
 
-## 1. Learning outcomes
-
-By the end of the session, participants will be able to:
-
-1. Explain what **Hera** is and how it relates to **Argo Workflows** and **Kubernetes**.
-2. Write a Python function as a workflow step using the `@script()` decorator.
-3. Build a **DAG** that contains a **dynamic parallel fan-out** (`with_sequence`) driven by an upstream discovery step that publishes its full payload as an **artifact** - the canonical data-pipeline pattern, scaled past Argo's parameter-size limit.
-4. Produce and view **visual artifacts** (matplotlib plots, including real-projection GIS maps with cartopy) directly from a workflow run, with **inline previews** in the Argo UI via `archive: none`.
-5. Promote a one-shot `Workflow` to a re-usable, parameterised **`WorkflowTemplate`** and submit it with different inputs (`start_time`, `end_time`, `limit`, `min_magnitude`).
-
----
-
-## 2. Prerequisites & setup (do *before* the workshop)
-
-| Requirement                                            | Notes                                                                                                                                 |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Python ≥ 3.9                                           | virtualenv or conda env                                                                                                               |
-| `pip install hera-workflows`                           | latest Hera (v5+) - runtime deps (numpy, matplotlib) come from the public container image                                             |
-| Access to an Argo Workflows cluster                    | any cluster works                                                                                                                     |
-| `ARGO_SERVER`, `ARGO_TOKEN`, `ARGO_NAMESPACE` env vars | from your own cluster - your auth provider or `kubectl -n argo create token argo-server`                                              |
-| Argo `artifactRepository` allowing `archive: none`     | required so the UI can render the snapshot/world-map PNGs inline rather than as `.tgz` downloads (the default S3/MinIO setup is fine) |
-
-A 10-minute pre-flight script `setup_check.py` is provided - participants run it before they arrive; instructor helps stragglers during the first break.
-
----
-
-## 3. Reference code
-
-### 3.1 Hello Hera
-
-[Hello world, source code](reference/hello-hera.py)
-
-### 3.2 DAG diamond (used at 0:20)
-
-[DAG, source code](reference/dag-hera.py)
-
-### 3.3 Workflow template
-
-[Workflow template, source code](reference/workflow-template-hera.py)
-
-### 3.4 Fan-in / Fan-out
-
-[Workflow fan-in/fan-out](reference/fanin-fanout-hera.py)
-
-### 3.5 Loops
-
-[Loops in workflow](reference/loops-hera.py)
-
----
-
-## 4. The pipeline we will build
-
-### 4.1 The experiment
-We will explore **aftershock sequences** around every catalogued M≥`{{min_magnitude}}` earthquake between `{{start_time}}` and `{{end_time}}` - both bounds, the magnitude threshold and the result `limit` come from `WorkflowTemplate` parameters, so the same template can be re-submitted for any window.
-The data comes from the public **USGS FDSN event web service** at `https://earthquake.usgs.gov/fdsnws/event/1/query`.
-A single `GET` returns GeoJSON; no auth, no key, no rate-limit headaches for a workshop room.
-
-For each mainshock we will fetch every other catalogued event within a 200 km radius and the following 7 days, render a two-panel diagnostic figure (magnitude-vs-time scatter on the left, **real GIS epicenter map** with coastlines / borders / land-ocean shading via cartopy on the right), and emit a flat summary (count, plus the mainshock's lat/lon for the fan-in).
-
-![Diagnostic figure](diagnostic.png)
-
-At the end we render a single **global world map** with every analyzed mainshock plotted on a Robinson projection - marker size encodes magnitude and colour encodes the number of aftershocks - so a single look tells the participant where the busy regions were during the query window.
-
-![Final world map](world_map.png)
-
-```mermaid
-flowchart LR
-    P[/"WorkflowTemplate params<br/>start_time, end_time<br/>limit, min_magnitude"/] --> A
-    A[list_significant<br/>USGS query] -- count --> B{{fan-out<br/>with_sequence}}
-    A -. "events.json<br/>artifact" .-> V1
-    A -. "events.json<br/>artifact" .-> V2
-    A -. "events.json<br/>artifact" .-> V3
-    A -. "events.json<br/>artifact" .-> VN
-    B --> V1[analyze_event<br/>index=0]
-    B --> V2[analyze_event<br/>index=1]
-    B --> V3[analyze_event<br/>…]
-    B --> VN[analyze_event<br/>index=N-1]
-    V1 --> AGG[plot_world_map]
-    V2 --> AGG
-    V3 --> AGG
-    VN --> AGG
-    AGG --> OUT[(world_map.png)]
-    V1 -.-> S1[(snapshot M1.png)]
-    V2 -.-> S2[(snapshot M2.png)]
-    V3 -.-> S3[(…)]
-    VN -.-> SN[(snapshot MN.png)]
-```
-
-Complete solution code is provided in [the solution file](solution/workshop.py), but we will build it up piece by piece during the exercises.
-
-### 4.2 First step: list_significant
-
-```python
-# FIXME: Add the `@script` decorator with appropriate inputs/outputs/image
+# 1) discovery
+@script(
+    image=IMAGE,
+    outputs=[
+        Artifact(name="events", path="/tmp/events.json"),
+        Parameter(name="count", value_from=ValueFrom(path="/tmp/count.txt")),
+    ],
+)
 def list_significant(start_time: str, end_time: str, limit: int, min_magnitude: float):
     """Query USGS for the M>=min_magnitude earthquakes catalogued between
-    start_time and end_time, returning a list of events sorted by
-    magnitude (descending) and truncated to the top `limit`.
+    start_time and end_time.
+
+    Writes the full list to /tmp/events.json (exposed as the `events`
+    Artifact) and the cardinality to /tmp/count.txt (exposed as the `count`
+    Parameter). Downstream tasks fan out via `with_sequence(count=...)` and
+    pull their own slice from the artifact -- avoiding the etcd payload
+    limit that breaks `with_param` once the event list gets large.
     """
     import json
     import urllib.parse
@@ -132,14 +54,22 @@ def list_significant(start_time: str, end_time: str, limit: int, min_magnitude: 
             "depth_km": depth,
         })
 
-    # FIXME: what is the resulting of this step?
-```
+    with open("/tmp/events.json", "w") as f:
+        json.dump(events, f)
+    with open("/tmp/count.txt", "w") as f:
+        f.write(str(len(events)))
 
 
-### 4.3 Second step: analyze_event
-
-```python
-# FIXME: Add the `@script` decorator with appropriate inputs/outputs/image
+# 2) per-event worker (the loop body)
+@script(
+    image=IMAGE,
+    inputs=[Artifact(name="events", path="/tmp/events.json")],
+    outputs=[
+        Artifact(name="snapshot", path="/tmp/snapshot.png",
+                 archive=ArchiveStrategy(none=NoneStrategy())),
+        Parameter(name="summary", value_from=ValueFrom(path="/tmp/summary.json")),
+    ],
+)
 def analyze_event(index: int):
     """For one mainshock, fetch every USGS-catalogued event within 200 km
     and the following 7 days, and render its aftershock sequence.
@@ -148,11 +78,19 @@ def analyze_event(index: int):
     origin time gates the temporal query -- so the result captures both
     productivity (how many) and decay (how fast they tail off) for that
     single event in isolation.
+
+    Outputs:
+      - /tmp/snapshot.png: two-panel figure -- magnitude-vs-hours scatter
+        on the left, real GIS epicenter map (cartopy) on the right.
+      - /tmp/summary.json: flat summary (id, mag, n_aftershocks,
+        max_aftershock, decay_slope) exposed as the `summary` output
+        parameter and consumed by the aggregator.
     """
     import subprocess
     import sys
-    # cartopy isn't in the base image, so we need to install it at runtime.
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "cartopy"])
+    # cartopy is not in jupyter/scipy-notebook by default; install at runtime.
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+                           "cartopy"])
 
     import collections
     import json
@@ -244,6 +182,7 @@ def analyze_event(index: int):
                  ha="center", va="center")
         ax1.axis("off")
 
+    # Real GIS map: PlateCarree projection centred on the mainshock
     pad = 4.0
     proj = ccrs.PlateCarree()
     ax2 = fig.add_subplot(1, 2, 2, projection=proj)
@@ -271,16 +210,30 @@ def analyze_event(index: int):
 
     fig.suptitle(label)
     fig.tight_layout()
-
-    # First output: the snapshot PNG
     plt.savefig("/tmp/snapshot.png", dpi=120)
 
-    # FIXME: what is the second output of this step, and how do we produce it?
-```
+    with open("/tmp/summary.json", "w") as f:
+        json.dump({
+            "id":             event_id,
+            "mag":            event_mag,
+            "place":          event_place,
+            "time_ms":        event_time_ms,
+            "lon":            event_lon,
+            "lat":            event_lat,
+            "n_aftershocks":  len(aftershocks),
+            "max_aftershock": max((a["mag"] for a in aftershocks), default=None),
+            "decay_slope":    slope,
+        }, f)
 
-### 4.4 Final step: plot_world_map
 
-```python
+# 3) cross-event aggregator (the fan-in)
+@script(
+    image=IMAGE,
+    outputs=[
+        Artifact(name="world_map", path="/tmp/world_map.png",
+                 archive=ArchiveStrategy(none=NoneStrategy())),
+    ],
+)
 def plot_world_map(results_json):
     """Global overview of every analyzed mainshock on a single world map.
 
@@ -292,7 +245,8 @@ def plot_world_map(results_json):
     """
     import subprocess
     import sys
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "cartopy"])
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet",
+                           "cartopy"])
 
     import json
     import matplotlib
@@ -350,21 +304,46 @@ def plot_world_map(results_json):
         ax.set_title("No mainshocks returned by list_significant")
 
     fig.tight_layout()
-
-    # This is the workflow's final output
     plt.savefig("/tmp/world_map.png", dpi=120)
-```
 
-### 4.5 The full workflow
 
-Now we have the building blocks, we can assemble them into a `Workflow` and then promote that to a `WorkflowTemplate` for re-use with different parameters.
+# workflow definition and submission
+if __name__ == "__main__":
+    global_config.host      = f'https://{os.environ.get("ARGO_SERVER")}'
+    global_config.token     = os.environ.get("ARGO_TOKEN")
+    global_config.namespace = os.environ.get("ARGO_NAMESPACE", "argo")
 
----
+    with WorkflowTemplate(
+        name="quake-aftershocks",
+        entrypoint="dag",
+        arguments=[
+            Parameter(name="start_time",    value="2026-04-28"),
+            Parameter(name="end_time",      value="2026-05-28"),
+            Parameter(name="limit",         value="20"),
+            Parameter(name="min_magnitude", value="5.0"),
+        ],
+    ) as w:
+        with DAG(name="dag"):
+            task_list_significant = list_significant(
+                arguments=[
+                    Parameter(name="start_time",    value="{{workflow.parameters.start_time}}"),
+                    Parameter(name="end_time",      value="{{workflow.parameters.end_time}}"),
+                    Parameter(name="limit",         value="{{workflow.parameters.limit}}"),
+                    Parameter(name="min_magnitude", value="{{workflow.parameters.min_magnitude}}"),
+                ],
+            )
+            task_analyze_event = analyze_event(
+                with_sequence=Sequence(
+                    count=task_list_significant.get_parameter("count").value,
+                ),
+                arguments=[
+                    Parameter(name="index", value="{{item}}"),
+                    task_list_significant.get_artifact("events"),
+                ],
+            )
+            task_plot_world_map = plot_world_map(
+                arguments={"results_json": task_analyze_event.get_parameter("summary").value},
+            )
+            task_list_significant >> task_analyze_event >> task_plot_world_map
 
-## 5. Resources
-
-- Hera docs - <https://hera.readthedocs.io>
-- Argo Workflows docs - <https://argo-workflows.readthedocs.io>
-- USGS FDSN event web service - <https://earthquake.usgs.gov/fdsnws/event/1/>
-- ArgoCon EU 2024 talk *"Orchestrating Python Functions Natively with Hera"* - <https://pipekit.io/blog/orchestrating-python-functions-natively-argo-hera>
-
+    w.create()

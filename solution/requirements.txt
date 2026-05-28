@@ -1,0 +1,3 @@
+hera==6.0.0
+hera[yaml]
+hera[cli]
