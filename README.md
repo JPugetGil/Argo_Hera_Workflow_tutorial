@@ -367,6 +367,7 @@ Now we have the building blocks, we can assemble them into a `Workflow` and then
 - Argo Workflows docs - <https://argo-workflows.readthedocs.io>
 - USGS FDSN event web service - <https://earthquake.usgs.gov/fdsnws/event/1/>
 - ArgoCon EU 2024 talk *"Orchestrating Python Functions Natively with Hera"* - <https://pipekit.io/blog/orchestrating-python-functions-natively-argo-hera>
+- Open Science, reproducible research, and the citation of articles, code and data alike - <https://zenodo.org/records/19557161>
 
 ---
 
